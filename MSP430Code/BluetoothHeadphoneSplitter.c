@@ -84,53 +84,59 @@
  *
  */
 #include <msp430.h>
-voic CLOCK_SETUP();
+void CLOCK_SETUP();
 void USB_UART_SETUP();
 void GPIO_UART_SETUP();
+void Send(char * input);
+void delay(int sec);
 
+unsigned char RXED[256]; // Received data
+unsigned int RXI = 0;    // Received data increment
 
 int main(void)
 {
     WDTCTL = WDTPW | WDTHOLD;               // Stop Watchdog
 
-
-    */
-    //GPIO-UART
-
-
     // Disable the GPIO power-on default high-impedance mode to activate
     // previously configured port settings
     PM5CTL0 &= ~LOCKLPM5;
 
+    CLOCK_SETUP();
+    GPIO_UART_SETUP();
 
+    __bis_SR_register(GIE);     // Enter LPM3, interrupts enabled
 
-    /* USB-UART
+    while(1){
+        Send("INQUIRY 1 \r");
+        delay(4);
+    }
 
-    */
-    // GPIO-UART
-
-
-
-    __bis_SR_register(LPM3_bits | GIE);     // Enter LPM3, interrupts enabled
-    __no_operation();                       // For debugger
 }
 
-#pragma vector=EUSCI_A0_VECTOR
+#pragma vector=EUSCI_A3_VECTOR
 __interrupt void USCI_A3_ISR(void)
 
 {
-    switch(__even_in_range(UCA0IV, USCI_UART_UCTXCPTIFG))
+    switch(__even_in_range(UCA3IV, USCI_UART_UCTXCPTIFG))
     {
         case USCI_NONE: break;
         case USCI_UART_UCRXIFG:
-            while(!(UCA0IFG&UCTXIFG));
-            UCA0TXBUF = UCA0RXBUF;
-            __no_operation();
+            RXED[RXI] = UCA3RXBUF;
+            RXI++;
             break;
         case USCI_UART_UCTXIFG: break;
         case USCI_UART_UCSTTIFG: break;
         case USCI_UART_UCTXCPTIFG: break;
         default: break;
+    }
+}
+
+void Send(char * input){
+    int i=0;
+    while (input){
+        while(!(UCA3IFG&UCTXIFG)); // Wait
+        UCA3TXBUF = input[i];     // Send
+        i++;
     }
 }
 
@@ -181,7 +187,12 @@ void GPIO_UART_SETUP(){
     UCA3IE |= UCRXIE;                       // Enable USCI_A0 RX interrupt
 }
 
-
+void delay(int sec){
+    while (sec<0){
+        __delay_cycles(1000000); // Delay 1s
+        sec--;
+    }
+}
 
 
 
