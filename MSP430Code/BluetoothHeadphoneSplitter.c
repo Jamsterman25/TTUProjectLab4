@@ -136,7 +136,20 @@
  *
  *
  */
+
+/* Pins used exclusively in this version of the program:
+ *
+ * P5.0 MUX control 0
+ * P5.1 MUX control 1
+ *
+ * P8.0 PB0 UP
+ * P8.1 PB1 DOWN
+ * P8.2 PB2 SELECT
+ * P8.3 PB3 CANCEL
+ *
+ */
 #include <msp430.h>
+#include <string.h>
 
 #define lcd_port        P3OUT
 #define lcd_port_dir    P3DIR
@@ -152,10 +165,11 @@
 #define d           3
 
 struct BTDevice{
-    char MAC[10];
-    int RSSI;
-    char * NAME;
+    char MAC[13];
+    char NAME[17];
+    char RSSI[3];
 };
+// All data is 1 byte larger than required to prevent overlap in pointer identification.
 
 void CLOCK_SETUP();
 void USB_UART_SETUP();
@@ -163,6 +177,7 @@ void GPIO_UART_SETUP();
 void Send(char * input);
 void delay(int sec);
 void Inquiry();
+void PB_SETUP();
 
 void lcd_reset();
 void lcd_pos(char pos);
@@ -175,6 +190,8 @@ void lcd_clear_bottom(char * line);
 
 struct BTDevice BTVector[10];
 
+unsigned char DeviceConnected[4] = "\0\0\0\0";
+
 unsigned char RXED[1024]; // Received data
 unsigned int RXI = 0;    // Received data increment
 
@@ -186,20 +203,31 @@ int main(void)
     // previously configured port settings
     PM5CTL0 &= ~LOCKLPM5;
 
-    CLOCK_SETUP();
-    GPIO_UART_SETUP();
+    CLOCK_SETUP();     // Setup clock 8Mhz
+    GPIO_UART_SETUP(); // Setup UART 9600 baud
+    lcd_setup();       // Setup LCD screen on port 3
+    PB_SETUP();        // Setup control push buttons
+
+    P5DIR |= 0x03u;    // MUX Select pins for selection of BC127 Device
 
     __bis_SR_register(GIE);     // Enter LPM3, interrupts enabled
 
-    lcd_setup();
+    P5OUT = 0x00; // 0000 0000 Select channel 0 (first BC127)
+    Send("power off\r");
+    delay(1);
+    P5OUT = 0x01; // 0000 0001 Select channel 1 (second BC127)
+    Send("power off\r");
+    delay(1);
+    P5OUT = 0x02; // 0000 0010 Select channel 2 (third BC127)
+    Send("power off\r");
+    delay(1);
+    P5OUT = 0x03; // 0000 0011 Select channel 3 (fourth BC127)
+    Send("power off\r");
+    delay(1);
 
     while(1){
-        lcd_display_top("Select Device:");
-        lcd_display_bottom("Jamoji JK");
-        delay(3);
-        lcd_display_top("Select Device:");
-        lcd_display_bottom("BEARDEDBLUE CLASSIC");
-        delay(1);
+
+
     }
 
 }
@@ -224,14 +252,89 @@ __interrupt void USCI_A3_ISR(void)
     }
 }
 
+#pragma vector=PORT8_VECTOR
+__interrupt void Port_8(void)
+{
+    switch(P8IFG){
+        case 0x01:
+            lcd_display_top("PB 0 Pressed");
+            break;
+        case 0x02:
+            lcd_display_top("PB 1 Pressed");
+            break;
+        case 0x04:
+            lcd_display_top("PB 2 Pressed");
+            break;
+        case 0x08:
+            lcd_display_top("PB 3 Pressed");
+            break;
+    }
+    P8IFG = 0; // Clear the interrupt
+}
+
 void Inquiry(){
     RXI = 0;
     Send("Inquiry 5\r");
     delay(6);
-    unsigned int i = 0;
-    for(i=0; i=RXI; i++){
+    unsigned int i=0;
+    unsigned int new = 1;
+    unsigned int BTVec = 0;
+    for(i=8; i<117; i++){
+        struct BTDevice temp;
+        memset(temp.NAME, '\0', 16);
+        switch(RXED[i]){
+            case 'I':
+                i += 8;
+                unsigned int iMAC = 0;
+                for(iMAC=0; iMAC<12; iMAC++){
+                    temp.MAC[iMAC] = RXED[i];
+                    i++;
+                }
+                break;
+            case '"':
+                i++;
+                unsigned int iNAME = 0;
+                while(RXED[i] != '"'){
+                    if(iNAME == 16){
+                        i++;
+                        continue;
+                    }
+                    temp.NAME[iNAME] = RXED[i];
+                    iNAME++;
+                    i++;
+                }
+                unsigned int iStruct = 0;
+                for(iStruct = 0; iStruct < 10; iStruct++){
+                    if(!strcmp(BTVector[iStruct].NAME,temp.NAME)){
+                        new = 0;
+                    }
+                }
+                if(new){
+                    unsigned int iMAC = 0;
+                    for(iMAC = 0; iMAC<12; iMAC++)
+                        BTVector[BTVec].MAC[iMAC] = temp.MAC[iMAC];
 
-    }
+                    unsigned int iNAME = 0;
+                    while(temp.NAME[iNAME]){
+                        BTVector[BTVec].NAME[iNAME] = temp.NAME[iNAME];
+                        iNAME++;
+                    }
+                    i += 9;
+                    BTVector[BTVec].RSSI[0] = RXED[i];
+                    i++;
+                    BTVector[BTVec].RSSI[1] = RXED[i];
+                    i += 3;
+                    BTVec++;
+                    break;
+                }
+                else{
+                    i += 13;
+                    break;
+                }
+            default:
+                break;
+           }
+       }
 }
 
 void Send(char * input){
@@ -297,6 +400,15 @@ void delay(int sec){
     }
 }
 
+void PB_SETUP(){
+    P8DIR &= ~0x0F; // 0000 1111 set PB 0-3 to input mode
+    P8IE = 0x0F;    // 0000 1111 Allow interrupts PB 0-3
+    P8IES = 0x0F;   // Select low edge for PB interrupt
+    P8REN = 0x0F;   // Enable internal pullup resistor enable
+    P8OUT = 0x0f;   // Pullup resistor activate
+    P8IFG = 0;      // Clear interrupts
+}
+
 void lcd_reset()
 {
     lcd_port_dir = 0xff;
@@ -351,6 +463,7 @@ void lcd_data (unsigned char dat)
 
 void lcd_display_top(char * line)
 {
+    lcd_clear_top("                ");
     lcd_pos(top);
     while (*line)
         lcd_data(*line++);
@@ -358,7 +471,6 @@ void lcd_display_top(char * line)
 
 void lcd_clear_top(char * line)
 {
-    lcd_clear_top("                ");
     lcd_pos(top);
     while (*line)
         lcd_data(*line++);
@@ -379,130 +491,3 @@ void lcd_clear_bottom(char * line)
         lcd_data(*line++);
 }
 
-
-
-
-/*
-  ECE 3362 project 6 UART Communication. This project will recieve an interrupt
-    from a keyboard input and return the pressed key to the console.
-   Target: TI LaunchPad development board with MSP430G2553 device with the
-    a speaker with DC blocking capacitor installed at P2.3 with common side
-    of speaker grounded
-       Date:           May 6, 2017
-       Last Revision:  1.0
-       Written by:     Jeremiah McCutcheon
-       Adapted from:   Dr. Michael Helm, Simple UART example.
-       & Troy Davis: UART Interrupt Example.
-       Assembler/IDE:  IAR Embedded Workbench 6.5
-        HW I/O assignments:
-        P1.0    LED1    (Active HIGH)RED
-        P1.1    not used   UART RX serial data (input to MSP430)
-        P1.2    not used   UART TX serial data (output from MSP430)
-        P1.3    not used PushButton (Active LOW) (internal Pullup Enabled)
-        P1.4    not used
-        P1.5    not used
-        P1.6    not used LED2    (Active HIGH)GREEN
-        P1.7    not used
-
-        P2.0    not used
-        P2.1    not used
-        P2.2    not used
-        P2.3    not used
-        P2.4    not used
-        P2.5    not used
-        P2.6    not used
-        P2.7    not used
-*/
-/*
-// Device Library
-#include <msp430.h>
-
-// Program Constants
-
-// UART
-#define UART_RX 0x02    // P1.1
-#define UART_TX 0x04    // P1.2
-#define UART_BR 109     // UART Baud Rate = 9600 baud at 1 MHz
-
-// Function prototypes
-void uartSetup();
-void timerSetup();
-void Send(char * tx_data);
-void delay(unsigned int sec);
-
-// Variables
-unsigned char rxArray[256];
-unsigned int rxIndex = 0;
-static char data;
-char* temp = " ";
-
-void main(void) {
-     WDTCTL = WDTPW | WDTHOLD;    // Stop watchdog timer
-
-    uartSetup();
-
-    rxIndex = 0;
-
-    P2DIR |= 0x03u;
-
-    _BIS_SR(GIE);
-
-    P2OUT = 0x00; // Set to ch0
-
-    while(1){
-        Send("get name\r\n");
-        delay(2);
-        //delay(2);
-    }
-
-}
-
-
-void uartSetup()
-{
-        DCOCTL=0;
-        BCSCTL1 = CALBC1_1MHZ; // Set DCO
-        DCOCTL = CALDCO_1MHZ;
-    // Set up UART
-        UCA0CTL1 |= UCSWRST;            // Disable UART
-        P1SEL |= UART_TX + UART_RX;     // Set port pins to UART mode
-        P1SEL2 |= UART_TX + UART_RX;    // Set port pins to UART mode
-        P1DIR |= UART_TX;               // Set TX pin as output
-        UCA0CTL1 |= UCSSEL_2;           // Set UART to use SMCLK (1 MHz)
-        UCA0BR0 = 109;                  // Set baud rate: 9600
-        UCA0BR1 = 0;
-        UCA0MCTL = UCBRS_0;             // UART Modulation Control setup
-        UCA0CTL1 &= ~UCSWRST;           // Enable UART
-        IE2 |= UCA0RXIE;                // Enable USCI_A0 RX interrupt
-}
-
-void delay(unsigned int sec){
-    while(sec>0){
-        __delay_cycles(1000000);
-        sec--;
-    }
-}
-
-void Send(char * tx_data) // Send Out TX
-{
-    unsigned int i=0;
-
-    while(tx_data[i]) // Increment
-    {
-        while ((UCA0STAT & UCBUSY)); // Wait
-        UCA0TXBUF = tx_data[i]; // Send out element
-        i++;
-    }
-}
-
-#pragma vector=USCIAB0RX_VECTOR  // Receive UART interrupt
-__interrupt void USCI0RX_ISR(void)
-{
-    data = UCA0RXBUF;
-
-    while ((UCA0STAT & UCBUSY)); // Wait
-    rxArray[rxIndex] = data; // Copy element to array
-    rxIndex++;
-
-}
-*/
