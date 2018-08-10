@@ -178,6 +178,11 @@ void Send(char * input);
 void delay(int sec);
 void Inquiry();
 void PB_SETUP();
+void PowerOff();
+void PowerOn();
+void Pair();
+void RePair();
+void UnPair();
 
 void lcd_reset();
 void lcd_pos(char pos);
@@ -190,7 +195,14 @@ void lcd_clear_bottom(char * line);
 
 struct BTDevice BTVector[10];
 
-unsigned char DeviceConnected[4] = "\0\0\0\0";
+unsigned int DeviceConnected = 0x00;
+unsigned int Device = 0; // Current device in vector
+unsigned int mode = 0;   // Device mode
+unsigned int pair = 0;
+unsigned int MMmode = 0; // Main menu mode
+unsigned int CANCEL = 0;
+unsigned int DT = 0;  // Controls whether the top can be written to
+unsigned int DB = 0;  // Controls whether the bottom can be written to
 
 unsigned char RXED[1024]; // Received data
 unsigned int RXI = 0;    // Received data increment
@@ -210,26 +222,59 @@ int main(void)
 
     P5DIR |= 0x03u;    // MUX Select pins for selection of BC127 Device
 
-    __bis_SR_register(GIE);     // Enter LPM3, interrupts enabled
+    __bis_SR_register(GIE);     // interrupts enabled
 
-    P5OUT = 0x00; // 0000 0000 Select channel 0 (first BC127)
-    Send("power off\r");
-    delay(1);
-    P5OUT = 0x01; // 0000 0001 Select channel 1 (second BC127)
-    Send("power off\r");
-    delay(1);
-    P5OUT = 0x02; // 0000 0010 Select channel 2 (third BC127)
-    Send("power off\r");
-    delay(1);
-    P5OUT = 0x03; // 0000 0011 Select channel 3 (fourth BC127)
-    Send("power off\r");
-    delay(1);
+    PowerOff();
 
     while(1){
-
-
+        switch(mode){
+            case 0:
+                if(!DT){
+                    lcd_display_top("Main Menu:");
+                    DT = 1;
+                }
+                switch(MMmode){
+                case 0:
+                    if(!DB){
+                        lcd_display_bottom("Add New Device");
+                        DB = 1;
+                    }
+                    break;
+                case 1:
+                    if(!DB){
+                        lcd_display_bottom("Reconnect Device");
+                        DB = 1;
+                    }
+                    break;
+                case 2:
+                    if(!DB){
+                        lcd_display_bottom("Remove Devices");
+                        DB = 1;
+                    }
+                    break;
+                }
+                break;
+            case 1:
+                Pair();
+                break;
+            case 2:
+                RePair();
+                break;
+            case 3:
+                lcd_display_top("Unpairing");
+                lcd_display_bottom("");
+                UnPair();
+                lcd_display_top("Done");
+                delay(5);
+                DT = 0;
+                DB = 0;
+                mode = 0;
+                break;
+            default:
+                mode = 0;
+        }
+        CANCEL = 0;
     }
-
 }
 
 #pragma vector=EUSCI_A3_VECTOR
@@ -255,18 +300,67 @@ __interrupt void USCI_A3_ISR(void)
 #pragma vector=PORT8_VECTOR
 __interrupt void Port_8(void)
 {
+    delay(5);
     switch(P8IFG){
-        case 0x01:
-            lcd_display_top("PB 0 Pressed");
+        case 0x01: // UP
+            DB = 0; // Allow bottom writing
+            switch(mode){
+            case 0:
+                if(MMmode == 0) MMmode = 2;
+                else if(MMmode == 1) MMmode = 0;
+                else if(MMmode == 2) MMmode = 1;
+                break;
+            case 1:
+                if(Device == 0){
+                    Device = 10;
+                    while(!BTVector[Device].NAME[0]){
+                        Device--;
+                    }
+                }
+                else
+                    Device--;
+                break;
+            default:
+                break;
+            }
             break;
-        case 0x02:
-            lcd_display_top("PB 1 Pressed");
+        case 0x02: // DOWN
+            DB = 0; // Allow bottom writing
+            switch(mode){
+                case 0:
+                    if(MMmode == 0) MMmode = 1;
+                    else if(MMmode == 1) MMmode = 2;
+                    else if(MMmode == 2) MMmode = 0;
+                    break;
+                case 1:
+                    if(Device == 9)
+                        Device = 0;
+                    else
+                        Device++;
+                    if(!BTVector[Device].NAME[0])
+                        Device = 0;
+                    break;
+                default:
+                    break;
+                       }
             break;
-        case 0x04:
-            lcd_display_top("PB 2 Pressed");
-            break;
-        case 0x08:
-            lcd_display_top("PB 3 Pressed");
+        case 0x04: // SELECT
+            switch(mode){
+                case 0:
+                    DT = 0;
+                    if(MMmode == 0) mode = 1;
+                    if(MMmode == 1) mode = 2;
+                    if(MMmode == 2) mode = 3;
+                    break;
+                case 1:
+                    pair = 1;
+                    break;
+                default:
+                    break;
+            }
+
+        case 0x08: // CANCEL
+            CANCEL = 1;
             break;
     }
     P8IFG = 0; // Clear the interrupt
@@ -274,12 +368,14 @@ __interrupt void Port_8(void)
 
 void Inquiry(){
     RXI = 0;
-    Send("Inquiry 5\r");
-    delay(6);
+    memset(RXED, '\0', 1024);
+    Send("Inquiry 8\r");
+    delay(110);
     unsigned int i=0;
     unsigned int new = 1;
     unsigned int BTVec = 0;
-    for(i=8; i<117; i++){
+    for(i=8; i<RXI+1; i++){
+        if(BTVec == 10) continue;
         struct BTDevice temp;
         memset(temp.NAME, '\0', 16);
         switch(RXED[i]){
@@ -337,6 +433,281 @@ void Inquiry(){
        }
 }
 
+void Pair(){
+    lcd_display_top("Searching...");
+    lcd_display_bottom("");
+    DB = 0;
+    switch(DeviceConnected){
+        case 0:
+        case 2:
+        case 4:
+        case 6:
+        case 8:
+        case 10:
+        case 12:
+        case 14:
+            P5OUT = 0x00; // 0000 0000 Select channel 0 (first BC127)
+            //Send("power on\r");
+            memset(BTVector, '\0', 320);
+            delay(3);
+            Inquiry();
+            lcd_display_top("Select Device:");
+            while(pair == 0){
+                if(!DB){
+                    lcd_display_bottom(BTVector[Device].NAME);
+                    DB = 1;
+                }
+                if(CANCEL){
+                    DB = 0;
+                    mode = 0;
+                    //Send("power off\r");
+                    return;
+                }
+            }
+            lcd_display_top("Pairing...");
+            lcd_display_bottom("");
+            Send("open ");
+            Send(BTVector[Device].MAC);
+            Send(" a2dp\r");
+            delay(100);
+            Send("music 10 play\r");
+            delay(20);
+            RXI = 0;
+            memset(RXED, '\0', 100);
+            Send("status\r");
+            delay(4);
+            if(RXED[63] == 'L')
+                DeviceConnected |= 0x01;
+            else{
+                lcd_display_top("Connect Failed");
+                delay(7);
+            }
+            delay(1);
+            DT = 0;
+            DB = 0;
+            pair = 0;
+            mode = 0;
+            break;
+        case 1:
+        case 5:
+        case 9:
+        case 13:
+            P5OUT = 0x01; // 0000 0001 Select channel 1 (second BC127)
+            //Send("power on\r");
+            memset(BTVector, '\0', 320);
+            delay(3);
+            Inquiry();
+            lcd_display_top("Select Device:");
+            while(pair == 0){
+                if(!DB){
+                    lcd_display_bottom(BTVector[Device].NAME);
+                    DB = 1;
+                }
+                if(CANCEL){
+                    DB = 0;
+                    mode = 0;
+                    //Send("power off\r");
+                    return;
+                }
+            }
+            lcd_display_top("Pairing...");
+            lcd_display_bottom("");
+            Send("open ");
+            Send(BTVector[Device].MAC);
+            Send(" a2dp\r");
+            delay(100);
+            Send("music 10 play\r");
+            delay(20);
+            RXI = 0;
+            memset(RXED, '\0', 100);
+            Send("status\r");
+            delay(4);
+            if(RXED[63] == 'L')
+                DeviceConnected |= 0x02;
+            else{
+                lcd_display_top("Connect Failed");
+                delay(7);
+            }
+            delay(1);
+            DT = 0;
+            DB = 0;
+            pair = 0;
+            mode = 0;
+            break;
+        case 3:
+        case 11:
+            P5OUT = 0x02; // 0000 0010 Select channel 2 (third BC127)
+            //Send("power on\r");
+            memset(BTVector, '\0', 320);
+            delay(3);
+            Inquiry();
+            lcd_display_top("Select Device:");
+            while(pair == 0){
+                if(!DB){
+                    lcd_display_bottom(BTVector[Device].NAME);
+                    DB = 1;
+                }
+                if(CANCEL){
+                    DB = 0;
+                    mode = 0;
+                    //Send("power off\r");
+                    return;
+                }
+            }
+            lcd_display_top("Pairing...");
+            lcd_display_bottom("");
+            Send("open ");
+            Send(BTVector[Device].MAC);
+            Send(" a2dp\r");
+            delay(100);
+            Send("music 10 play\r");
+            delay(20);
+            RXI = 0;
+            memset(RXED, '\0', 100);
+            Send("status\r");
+            delay(4);
+            if(RXED[63] == 'L')
+                DeviceConnected |= 0x04;
+            else{
+                lcd_display_top("Connect Failed");
+                delay(7);
+            }
+            delay(1);
+            DT = 0;
+            DB = 0;
+            pair = 0;
+            mode = 0;
+            break;
+        case 7:
+            P5OUT = 0x03; // 0000 0011 Select channel 3 (fourth BC127)
+            //Send("power on\r");
+            memset(BTVector, '\0', 320);
+            delay(3);
+            Inquiry();
+            lcd_display_top("Select Device:");
+            while(pair == 0){
+                if(!DB){
+                    lcd_display_bottom(BTVector[Device].NAME);
+                    DB = 1;
+                }
+                if(CANCEL){
+                    DB = 0;
+                    mode = 0;
+                    //Send("power off\r");
+                    return;
+                }
+            }
+            lcd_display_top("Pairing...");
+            lcd_display_bottom("");
+            Send("open ");
+            Send(BTVector[Device].MAC);
+            Send(" a2dp\r");
+            delay(100);
+            Send("music 10 play\r");
+            delay(20);
+            RXI = 0;
+            memset(RXED, '\0', 100);
+            Send("status\r");
+            delay(4);
+            if(RXED[63] == 'L')
+                DeviceConnected |= 0x01;
+            else{
+                lcd_display_top("Connect Failed");
+                delay(7);
+            }
+            delay(1);
+            DT = 0;
+            DB = 0;
+            pair = 0;
+            mode = 0;
+            break;
+        case 15:
+            lcd_display_top("Maximum Devices!");
+            lcd_display_bottom("");
+            delay(7);
+            mode = 0;
+            DT = 0;
+            DB = 0;
+            break;
+    }
+}
+
+void RePair(){
+    lcd_display_top("Pairing...");
+    lcd_display_bottom("");
+    //PowerOn();
+    delay(50);
+
+    P5OUT = 0x00; // 0000 0000 Select channel 0 (first BC127)
+    RXI = 0;
+    memset(RXED, '\0', 100);
+    Send("status\r");
+    delay(4);
+    if(RXED[63] == 'L'){
+        Send("music 10 play\r");
+        delay(20);
+        DeviceConnected |= 0x01;
+    }
+    delay(1);
+
+    P5OUT = 0x01; // 0000 0001 Select channel 1 (second BC127)
+    RXI = 0;
+    memset(RXED, '\0', 100);
+    Send("status\r");
+    delay(4);
+    if(RXED[63] == 'L'){
+        Send("music 10 play\r");
+        delay(20);
+        DeviceConnected |= 0x02;
+    }
+    delay(1);
+
+    P5OUT = 0x02; // 0000 0010 Select channel 2 (third BC127)
+    RXI = 0;
+    memset(RXED, '\0', 100);
+    Send("status\r");
+    delay(4);
+    if(RXED[63] == 'L'){
+        Send("music 10 play\r");
+        delay(20);
+        DeviceConnected |= 0x04;
+    }
+    delay(1);
+
+    P5OUT = 0x03; // 0000 0011 Select channel 3 (fourth BC127)
+    RXI = 0;
+    memset(RXED, '\0', 100);
+    Send("status\r");
+    delay(4);
+    if(RXED[63] == 'L'){
+        Send("music 10 play\r");
+        delay(20);
+        DeviceConnected |= 0x08;
+    }
+    delay(1);
+
+    PowerOff();
+    DT = 0;
+    DB = 0;
+    mode = 0;
+}
+
+void UnPair(){
+    P5OUT = 0x00; // 0000 0000 Select channel 0 (first BC127)
+    Send("unpair\r");
+    delay(1);
+    P5OUT = 0x01; // 0000 0001 Select channel 1 (second BC127)
+    Send("unpair\r");
+    delay(1);
+    P5OUT = 0x02; // 0000 0010 Select channel 2 (third BC127)
+    Send("unpair\r");
+    delay(1);
+    P5OUT = 0x03; // 0000 0011 Select channel 3 (fourth BC127)
+    Send("unpair\r");
+    delay(1);
+    DeviceConnected = 0;
+}
+
 void Send(char * input){
     int i=0;
     while (input[i]){
@@ -344,6 +715,44 @@ void Send(char * input){
         UCA3TXBUF = input[i];     // Send
         i++;
     }
+}
+
+void PowerOn(){
+    P5OUT = 0x00; // 0000 0000 Select channel 0 (first BC127)
+    Send("power on\r");
+    delay(1);
+    P5OUT = 0x01; // 0000 0001 Select channel 1 (second BC127)
+    Send("power on\r");
+    delay(1);
+    P5OUT = 0x02; // 0000 0010 Select channel 2 (third BC127)
+    Send("power on\r");
+    delay(1);
+    P5OUT = 0x03; // 0000 0011 Select channel 3 (fourth BC127)
+    Send("power on\r");
+    delay(1);
+}
+
+void PowerOff(){
+    P5OUT = 0x00; // 0000 0000 Select channel 0 (first BC127)
+    Send("discoverable off\r");
+    delay(1);
+    //Send("power off\r");
+    delay(1);
+    P5OUT = 0x01; // 0000 0001 Select channel 1 (second BC127)
+    Send("discoverable off\r");
+    delay(1);
+    //Send("power off\r");
+    delay(1);
+    P5OUT = 0x02; // 0000 0010 Select channel 2 (third BC127)
+    Send("discoverable off\r");
+    delay(1);
+    //Send("power off\r");
+    delay(1);
+    P5OUT = 0x03; // 0000 0011 Select channel 3 (fourth BC127)
+    Send("discoverable off\r");
+    delay(1);
+    //Send("power off\r");
+    delay(1);
 }
 
 void CLOCK_SETUP(){
@@ -395,7 +804,7 @@ void GPIO_UART_SETUP(){
 
 void delay(int sec){
     while (sec>0){
-        __delay_cycles(8000000); // Delay 1s
+        __delay_cycles(800000); // Delay .1s
         sec--;
     }
 }
@@ -490,4 +899,3 @@ void lcd_clear_bottom(char * line)
     while (*line)
         lcd_data(*line++);
 }
-
