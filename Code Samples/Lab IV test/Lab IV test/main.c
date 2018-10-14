@@ -18,6 +18,8 @@ int main() {
     
     struct BTDevice BTVector[10];
     
+    // The single quote ' is used in place of " which is what is actually recieved from the BC127 device
+    
     char RXED[256] = "PENDING INQUIRY 20FABB09067C 'BC127_MODULE_4' 240404 34db INQUIRY 20FABB069JBK 'Jamoji JK' 240404 69db INQUIR_OK";
     
     unsigned int i=0;
